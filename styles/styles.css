@@ -43,26 +43,28 @@ body, html {
 }
 
 .image-button img {
-    width: 24px;  /* Adjust size as needed */
+    width: 24px;
     height: 24px;
 }
 
-#summarizeBtn, #explainBtn, #languageSelect {
-    padding: 5px 10px;
+.right-actions button, .right-actions select {
+    padding: 4px 8px;
     font-size: 13px;
     cursor: pointer;
     width: min-content;
+    border-radius: 4px;
+    background-color: lightblue;
 }
 
 .image-button {
     border: none;
     background: none;
     cursor: pointer;
-    margin-right: 5px; /* Adds some space between the "Copy" button and other controls */
+    margin-right: 5px;
 }
 
 .image-button img {
-    width: 24px;  /* Adjust size as needed */
+    width: 24px;
     height: 24px;
 }
 
@@ -85,3 +87,25 @@ body, html {
     animation: clickAnimation 0.2s ease;
 }
 
+
+.loader {
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #3498db;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  animation: spin 1s linear infinite;
+  display: inline-block;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
