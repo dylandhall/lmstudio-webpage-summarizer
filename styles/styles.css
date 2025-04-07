@@ -1,9 +1,10 @@
 body, html {
-    margin: 10;
-    padding: 10;
+    margin: 2px;
+    padding: 2px;
     width: 400px; /* Define a largura do popup */
     height: 500px; /* Define a altura do popup */
     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+    background: grey;
 }
 
 .container {
@@ -18,8 +19,9 @@ body, html {
     border: 1px solid #ccc;
     margin: 10px;
     padding: 10px;
-    resize: none; /* Impede o redimensionamento do textarea */
+    resize: none;
     box-sizing: border-box;
+    background: lightgray;
 }
 
 .actions {

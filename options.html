@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Options</title>
+    <style>
+        body { font-family: sans-serif; padding: 10px; width: 400px; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+        textarea { width: 100%; height: 80px; margin-top: 5px; box-sizing: border-box;}
+        input[type="text"] { width: 100%; margin-top: 5px; box-sizing: border-box; padding: 5px;}
+        button { margin-top: 15px; padding: 8px 15px; }
+        #status { margin-top: 10px; color: green; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Options</h1>
+
+    <label for="modelName">LLM Model Name:</label>
+    <input type="text" id="modelName" placeholder="e.g., lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF">
+
+    <label for="summarizePrompt">Summarize Prompt:</label>
+    <textarea id="summarizePrompt" placeholder="Enter the system prompt for summarization. Use '{lang}' where the language should be inserted. Example: Summarize the following text in {lang} language:"></textarea>
+
+    <label for="explainPrompt">Explain Prompt:</label>
+    <textarea id="explainPrompt" placeholder="Enter the system prompt for explanation. Use '{lang}' where the language should be inserted. Example: Explain the following text simply in {lang} language:"></textarea>
+
+    <button id="save">Save Options</button>
+    <div id="status"></div>
+
+    <script src="options.js" type="module"></script>
+</body>
+</html>

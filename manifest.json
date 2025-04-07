@@ -1,7 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "Summarizador de Página Web",
-    "version": "1.1",
+    "name": "Local LLM Summary Extension",
+    "version": "1.4",
+    "description": "Summarises or explains web pages and selected text using a local LLM.",
     "permissions": [
       "activeTab",
       "scripting",
@@ -9,7 +10,8 @@
       "tabs"
     ],
     "background": {
-      "service_worker": "background.js"
+      "service_worker": "background.js",
+      "type": "module"
     },
     "action": {
       "default_popup": "popup.html",
@@ -24,11 +26,11 @@
       "48": "images/icon48.png",
       "128": "images/icon128.png"
     },
+    "options_page": "options.html",
     "web_accessible_resources": [
       {
-          "resources": ["lib/pdf.worker.mjs", "lib/pdf.min.mjs", "lib/pdf.mjs"],
-          "matches": ["<all_urls>"]
+        "resources": ["lib/pdf.worker.mjs", "lib/pdf.min.mjs", "lib/pdf.mjs"],
+        "matches": ["<all_urls>"]
       }
-  ]
-  }
-  
+    ]
+}
