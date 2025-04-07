@@ -147,9 +147,9 @@ async function resetState() {
 function renderInitialSummary() {
     if (!initialSummaryDisplayElement) return;
     // Show loader ONLY if processing initial summary AND no previous summary exists
-    if (popupState.isProcessing && !popupState.initialSummaryHtml && !popupState.conversationHistory.length) {
+    if (popupState.isProcessing && popupState.initialSummaryHtml?.length < 1) {
          initialSummaryDisplayElement.innerHTML = '<div class="loader"></div> Processing...';
-    } else if (popupState.initialSummaryHtml) {
+    } else if (popupState.initialSummaryHtml?.length > 0) {
         initialSummaryDisplayElement.innerHTML = popupState.initialSummaryHtml;
     } else {
         initialSummaryDisplayElement.innerHTML = 'Summary/Explanation will appear here...';
@@ -387,7 +387,7 @@ async function handleBackgroundMessage(message) {
 
     // --- Normal Message Processing ---
     // Clear processing/retry indicators (if any exist)
-    const isProcessing = (message.action === "update" || message.action === "context") && initialSummaryDisplayElement && initialSummaryDisplayElement.innerHTML.includes("loader");
+    const isProcessing = (message.action === "update" || message.action === "context") && initialSummaryDisplayElement && initialSummaryDisplayElement.innerHTML.includes("loader") && message.summary?.length > 0;
 
     const isRetrying = message.action === "update" && currentAssistantChatBubbleElement && currentAssistantChatBubbleElement.innerText.includes("Retrying...");
      if (isProcessing) {
@@ -397,7 +397,7 @@ async function handleBackgroundMessage(message) {
          currentAssistantChatBubbleElement.innerText = "";
      }
 
-     if (isProcessing || isRetrying){
+     if (isProcessing || isRetrying) {
          popupState.currentAccumulator = '';
          await saveState();
      }
@@ -502,7 +502,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load state
     await loadState(currentTabId);
 
-    if (popupState.isProcessing){
+    if (popupState.isProcessing) {
         if (popupState.initialSummaryHtml?.length > 0){
             popupState.isProcessing = false;
         } else {
