@@ -1,19 +1,30 @@
 // popup.js
-// import { defaultModel, defaultSummarizePrompt, defaultExplainPrompt } from './defaults.js'; // If needed for defaults here
 
-// --- Global State ---
-let port = null;
-let originalArticleText = '';
-let conversationHistory = [];
-let isChatVisible = false;
+// --- Default State Structure ---
+function getDefaultPopupState() {
+    return {
+        originalArticleText: '',
+        conversationHistory: [],
+        initialSummaryHtml: '',
+        isChatVisible: false,
+        isProcessing: false, // Still track if background *should* be busy
+    };
+}
+
+// --- Global Non-Persistent State ---
+let port = null; // Null when disconnected
+let currentTabId = null;
 let currentAssistantChatBubbleElement = null;
-let currentAccumulator = ''; // Used *only* during streaming of a single message
+let currentAccumulator = '';
+let isConnectingOnClick = false; // Flag for user-initiated connection attempt
+
+// --- Current State (Loaded/Saved) ---
+let popupState = getDefaultPopupState();
 
 // --- DOM Elements ---
 let containerElement;
 let initialSummaryDisplayElement;
 let chatBubblesAreaElement;
-let chatDisplayElement;
 let chatInputAreaElement;
 let chatInputElement;
 let sendChatBtnElement;
@@ -22,6 +33,7 @@ let summarizeBtnElement;
 let explainBtnElement;
 let copyBtnElement;
 let languageSelectElement;
+let statusIndicatorElement = null;
 
 // --- Initialize Showdown ---
 const markdownConverter = new showdown.Converter({
@@ -29,214 +41,409 @@ const markdownConverter = new showdown.Converter({
     simpleLineBreaks: true
 });
 
-// --- Functions ---
-
+// --- Utility Functions ---
 function disableButtons(disabled) {
-    if (summarizeBtnElement) summarizeBtnElement.disabled = disabled;
-    if (explainBtnElement) explainBtnElement.disabled = disabled;
-    if (copyBtnElement) copyBtnElement.disabled = disabled;
-    if (languageSelectElement) languageSelectElement.disabled = disabled;
-    // Disable chat buttons selectively
-    if (sendChatBtnElement) sendChatBtnElement.disabled = disabled;
-    if (chatInputElement) chatInputElement.disabled = disabled;
-    // Don't disable chat toggle based on processing state, only availability
-    if (chatToggleBtnElement) chatToggleBtnElement.disabled = !originalArticleText; // Only enable if context exists
+    // Disable based on active processing or connection attempt
+    const isBusy = popupState.isProcessing || isConnectingOnClick;
+    if (summarizeBtnElement) summarizeBtnElement.disabled = disabled || isBusy;
+    if (explainBtnElement) explainBtnElement.disabled = disabled || isBusy;
+    if (copyBtnElement) copyBtnElement.disabled = disabled; // Keep copy enabled?
+    if (languageSelectElement) languageSelectElement.disabled = disabled || isBusy;
+    if (sendChatBtnElement) sendChatBtnElement.disabled = disabled || isBusy;
+    if (chatInputElement) chatInputElement.disabled = disabled || isBusy;
+    if (chatToggleBtnElement) chatToggleBtnElement.disabled = disabled || !popupState.originalArticleText || isBusy;
 }
 
+// Consolidated disable logic - depends ONLY on popupState.isProcessing and isConnectingOnClick
+function updateButtonStates() {
+    const isBusy = popupState.isProcessing || isConnectingOnClick;
 
-function scrollToBottom() {
-    if (chatDisplayElement) {
-        chatDisplayElement.scrollTop = chatDisplayElement.scrollHeight;
+    if (summarizeBtnElement) summarizeBtnElement.disabled = isBusy;
+    if (explainBtnElement) explainBtnElement.disabled = isBusy;
+    if (copyBtnElement) copyBtnElement.disabled = false; // Generally keep copy enabled
+    if (languageSelectElement) languageSelectElement.disabled = isBusy;
+    if (sendChatBtnElement) sendChatBtnElement.disabled = isBusy;
+    if (chatInputElement) chatInputElement.disabled = isBusy;
+    // Chat toggle depends on context AND not being busy
+    if (chatToggleBtnElement) {
+         chatToggleBtnElement.disabled = isBusy || !popupState.originalArticleText;
+         // Also ensure visibility reflects context existence
+         chatToggleBtnElement.style.display = popupState.originalArticleText ? 'inline-block' : 'none';
     }
 }
 
-// Scrolls the CHAT BUBBLE area
 function scrollChatToBottom() {
     if (chatBubblesAreaElement) {
         chatBubblesAreaElement.scrollTop = chatBubblesAreaElement.scrollHeight;
     }
 }
 
-// Renders chat history bubbles (Does NOT touch initial summary)
-function renderChatBubbles() {
-    if (!chatBubblesAreaElement) return;
-    chatBubblesAreaElement.innerHTML = ''; // Clear previous bubbles
-    conversationHistory.forEach(message => {
-        addChatBubble(message.role, message.content, false); // Add existing messages
-    });
-    // Don't scroll here, only scroll when adding new messages dynamically
+
+function showStatus(message = "", isError = false) {
+    // Create if doesn't exist
+    if (!statusIndicatorElement && containerElement) {
+        statusIndicatorElement = document.createElement('div');
+        statusIndicatorElement.style.position = 'absolute'; statusIndicatorElement.style.bottom = '45px';
+        statusIndicatorElement.style.left = '10px'; statusIndicatorElement.style.padding = '2px 5px';
+        statusIndicatorElement.style.fontSize = '10px'; statusIndicatorElement.style.borderRadius = '3px';
+        statusIndicatorElement.style.zIndex = '10'; statusIndicatorElement.style.maxWidth = 'calc(100% - 20px)';
+        statusIndicatorElement.style.overflow = 'hidden'; statusIndicatorElement.style.textOverflow = 'ellipsis';
+        statusIndicatorElement.style.whiteSpace = 'nowrap';
+        containerElement.appendChild(statusIndicatorElement);
+    }
+    // Update content and style
+    if (statusIndicatorElement) {
+        if (message) {
+            statusIndicatorElement.textContent = message; statusIndicatorElement.setAttribute('title', message);
+            statusIndicatorElement.style.backgroundColor = isError ? '#f8d7da' : '#cfe2ff';
+            statusIndicatorElement.style.color = isError ? '#842029' : '#052c65';
+            statusIndicatorElement.style.display = 'block';
+        } else {
+            statusIndicatorElement.style.display = 'none'; statusIndicatorElement.removeAttribute('title');
+        }
+    }
 }
 
-// Adds a bubble to the CHAT BUBBLE area. Returns the element.
+// --- State Management Functions ---
+async function saveState() {
+    if (!currentTabId) return;
+    const key = `tabState_${currentTabId}`;
+    try {
+        await chrome.storage.session.set({ [key]: { ...popupState } }); // Save a clone
+    } catch (error) { console.error("Popup: Error saving state:", error); }
+}
+
+async function loadState(tabId) {
+    const key = `tabState_${tabId}`;
+    try {
+        const result = await chrome.storage.session.get(key);
+        if (result && result[key]) {
+            popupState = result[key]; return true;
+        }
+    } catch (error) { console.error("Popup: Error loading state:", error); }
+    popupState = getDefaultPopupState(); // Use default if not found or on error
+    return false;
+}
+
+async function resetState(clearDisplay = true) {
+    console.log("Popup: Resetting state.");
+    popupState = getDefaultPopupState(); // Reset state object (sets isProcessing=false)
+    isConnectingOnClick = false; // Reset non-persistent flags
+    currentAccumulator = ''; currentAssistantChatBubbleElement = null;
+
+    // Clear storage for this tab
+    if (currentTabId) {
+        const key = `tabState_${currentTabId}`;
+        try { await chrome.storage.session.remove(key); }
+        catch (error) { console.error(`Popup: Error clearing state for tab ${currentTabId}:`, error); }
+    }
+
+    // Apply the clean state to the UI
+    if (clearDisplay) { applyStateToUI(); }
+    else { updateButtonStates(); } // Ensure buttons are enabled after reset unless starting new command immediately
+
+    showStatus(""); // Clear any status message
+}
+
+// --- UI Rendering Functions ---
+function renderInitialSummary() {
+    if (!initialSummaryDisplayElement) return;
+    // Show loader ONLY if processing initial summary AND no previous summary exists
+    if (popupState.isProcessing && !popupState.initialSummaryHtml && !popupState.conversationHistory.length) {
+         initialSummaryDisplayElement.innerHTML = '<div class="loader"></div> Processing...';
+    } else if (popupState.initialSummaryHtml) {
+        initialSummaryDisplayElement.innerHTML = popupState.initialSummaryHtml;
+    } else {
+        initialSummaryDisplayElement.innerHTML = 'Summary/Explanation will appear here...';
+    }
+}
+
+function renderChatBubbles() {
+    if (!chatBubblesAreaElement) return;
+    chatBubblesAreaElement.innerHTML = '';
+    popupState.conversationHistory.forEach(message => {
+        addChatBubble(message.role, message.content, false);
+    });
+    // If reloading while processing a *chat* message, add the placeholder back
+    if (popupState.isProcessing && popupState.conversationHistory.length > 0 && popupState.conversationHistory[popupState.conversationHistory.length - 1].role === 'user') {
+         console.log("renderChatBubbles: Adding placeholder for ongoing chat response.");
+         addChatBubble('assistant', '', true);
+    }
+    if (popupState.isChatVisible) { setTimeout(scrollChatToBottom, 50); }
+}
+
 function addChatBubble(role, content = "", isStreamingPlaceholder = false) {
      if (!chatBubblesAreaElement) return null;
      const messageDiv = document.createElement('div');
      messageDiv.classList.add(role === 'user' ? 'user-message' : 'assistant-message');
-
      if (isStreamingPlaceholder && role === 'assistant') {
          messageDiv.innerHTML = '<div class="loader"></div>';
-         currentAssistantChatBubbleElement = messageDiv; // Store reference
-         currentAccumulator = ''; // Reset accumulator for this stream
-     } else if (role === 'user') {
-         messageDiv.innerText = content;
-     } else { // Render existing assistant chat message
-         try {
-             messageDiv.innerHTML = markdownConverter.makeHtml(content);
-         } catch (e) { messageDiv.innerText = content; }
-     }
+         currentAssistantChatBubbleElement = messageDiv;
+         currentAccumulator = '';
+     } else if (role === 'user') { messageDiv.innerText = content; }
+     else { try { messageDiv.innerHTML = markdownConverter.makeHtml(content); } catch (e) { messageDiv.innerText = content; } }
      chatBubblesAreaElement.appendChild(messageDiv);
-     // Scroll when adding user message or placeholder
-     if (role === 'user' || isStreamingPlaceholder) {
-        scrollChatToBottom();
-     }
+     if (role === 'user' || isStreamingPlaceholder) { scrollChatToBottom(); }
      return messageDiv;
 }
 
-function toggleChatInput() {
-    isChatVisible = !isChatVisible;
-    // Toggle class on the main container
-    if (containerElement) {
-         containerElement.classList.toggle('chat-active', isChatVisible);
-         console.log("Popup: Toggled chat active state. Is active:", isChatVisible);
-    } else {
-         console.error("Popup: Container element not found for toggling chat class.");
-    }
-
-    if (isChatVisible && chatInputElement) {
-        chatInputElement.focus();
-        // Scroll may need slight delay to allow layout shift
-        setTimeout(scrollChatToBottom, 50);
-    }
+// Apply UI state based on loaded/current popupState
+function applyStateToUI() {
+     renderInitialSummary();
+     renderChatBubbles();
+     // Update container class and chat area visibility based on state
+     if (containerElement) { containerElement.classList.toggle('chat-active', popupState.isChatVisible); }
+     if (chatBubblesAreaElement) { chatBubblesAreaElement.style.display = popupState.isChatVisible ? 'block' : 'none'; }
+     if (chatInputAreaElement) { chatInputAreaElement.style.display = popupState.isChatVisible ? 'flex' : 'none'; }
+     // Update button states (visibility and disabled)
+     updateButtonStates();
+     // console.log("Applied state to UI, isProcessing:", popupState.isProcessing, "isChatVisible:", popupState.isChatVisible); // DEBUG
 }
 
-// Handles sending summarize/explain commands
-function sendCommand(commandType) {
-    if (!port) { /* ... */ return; }
-
-    // --- RESET state ---
-    console.log("Popup: Resetting state for new command.");
-    originalArticleText = '';
-    conversationHistory = [];
-    isChatVisible = false;
-
-    // <<< Remove .chat-active class from container >>>
-    if (containerElement) {
-        containerElement.classList.remove('chat-active');
+// --- Interaction Functions ---
+async function toggleChatInput() {
+    popupState.isChatVisible = !popupState.isChatVisible; // Update state
+    // Apply UI changes immediately
+    if (containerElement) { containerElement.classList.toggle('chat-active', popupState.isChatVisible); }
+    if (chatBubblesAreaElement) { chatBubblesAreaElement.style.display = popupState.isChatVisible ? 'block' : 'none'; }
+    if (chatInputAreaElement) { chatInputAreaElement.style.display = popupState.isChatVisible ? 'flex' : 'none'; }
+    if (popupState.isChatVisible && chatInputElement) {
+        chatInputElement.focus();
+        setTimeout(scrollChatToBottom, 50);
     }
+    await saveState(); // Save the toggled state
+}
 
-    if (initialSummaryDisplayElement) initialSummaryDisplayElement.innerHTML = '<div class="loader"></div> Processing...';
-    if (chatBubblesAreaElement) chatBubblesAreaElement.innerHTML = ''; // Clear bubbles
-    if (chatToggleBtnElement) chatToggleBtnElement.style.display = 'none'; // Hide chat toggle
-    currentAssistantChatBubbleElement = null;
-    currentAccumulator = '';
-    disableButtons(true);
-    // --- End RESET ---
 
-    const selectedLanguage = languageSelectElement.value;
 
-    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-        if (!tab || !tab.id) { console.error('no tab found'); return; }
+// --- NEW: Function to Connect Port (called on demand) ---
+// --- Connect Port Function ---
+function connectPort() {
+    return new Promise((resolve, reject) => {
+        if (port) { resolve(port); return; }
+        if (isConnectingOnClick) { reject(new Error("Connection attempt in progress.")); return; }
+        isConnectingOnClick = true; showStatus("Connecting..."); updateButtonStates(); // Disable buttons
 
-        chrome.scripting.executeScript(
-            { target: { tabId: tab.id }, func: () => window.getSelection().toString(), },
-            (selection) => {
-                if (chrome.runtime.lastError) {
-                    console.error('chrome.runtime.lastError', chrome.runtime.lastError);
-                    return;
-                }
-                const selectedText = selection?.[0]?.result?.trim();
-                let message = { language: selectedLanguage };
-                let shouldSendMessage = true;
-                if (selectedText) {
-                       message.command = commandType === 'summarize' ? "summarizeSelectedText" : "explainSelectedText";
-                       message.text = selectedText;
-                       originalArticleText = selectedText;
-                } else if (tab.url && !tab.url.startsWith('http') && !tab.url.startsWith('file')) {
-                     /* ... skip non-webpage ... */
-                     shouldSendMessage = false;
-                } else if (tab.url && tab.url.toLowerCase().endsWith(".pdf")) {
-                    shouldSendMessage = false;
-                    originalArticleText = ''; // <<< Reset, wait for PDF content
-                    // Content script needs to send content back to background
-                    // Background needs to potentially forward it to popup if needed? Or just use it for summary.
-                    // Let's simplify: Background gets PDF content, generates summary, sends summary.
-                    // Popup receives summary ('complete'), stores THAT as the FIRST history item,
-                    // but doesn't have original PDF text unless BG sends it via 'context'.
-                    // --- Let's have BG send PDF context too ---
-                    chrome.storage.local.set({ pdfProcessingInfo: { language: selectedLanguage, mode: commandType } })
-                        .then(() => chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["getContentScript.js"] }))
-                        .catch(err => { /* ... */ });
-                } else {
-                    // Whole page summary/explanation
-                    message.command = commandType === 'summarize' ? "summarize" : "explain";
-                    originalArticleText = ''; // <<< Reset, wait for 'context' action from background
-                    console.log(`Popup: Using whole page. Sending '${message.command}' message.`);
-                }
-
-                if (shouldSendMessage && port) {
-                     console.log("Popup: Sending message to background:", message);
-                     try { port.postMessage(message); } catch(e) { /* ... port error handling ... */ }
-                } else if (shouldSendMessage && !port) { /* ... port error handling ... */ }
-                 else if (!shouldSendMessage && contextSource === 'pdf') {
-                     // Wait for content script to send message for PDF
-                     console.log("Popup: Waiting for PDF content script...");
-                 }
-            } // End selection callback
-        ); // End executeScript
-    }).catch(error => {
-         console.error("Popup: Error querying tabs:", error);
-         summaryElement.innerText = `Error: ${error.message}`;
-         disableButtons(false);
-         accumulatedRawText = ''; // Clear on error
+        try {
+            const newPort = chrome.runtime.connect({ name: "popup" });
+            newPort.onMessage.addListener(handleBackgroundMessage);
+            newPort.onDisconnect.addListener(() => handleDisconnect(newPort));
+            port = newPort; isConnectingOnClick = false;
+            showStatus("Connected.", false); setTimeout(() => showStatus(""), 1500);
+            // Don't update buttons here, let the caller do it after resolving
+            resolve(port);
+        } catch (error) {
+            port = null; isConnectingOnClick = false;
+            showStatus("Connection failed. Click action to retry.", true);
+            updateButtonStates(); // Re-enable buttons on failure
+            reject(error);
+        }
     });
 }
 
-// Handles sending a chat message
-function sendChatMessage() {
-    if (!port || !chatInputElement || !originalArticleText) { // <<< Check originalArticleText
-         console.error("Popup: Cannot send chat. Port, input, or ORIGINAL ARTICLE TEXT missing.");
-         if (!originalArticleText) {
-             // Maybe show error in UI
-             console.error("Original article context is missing. Cannot ask questions.");
-         }
-         return;
-     }
-     const question = chatInputElement.value.trim();
-     if (!question) return;
 
-     // Add user question to history and display in BUBBLE AREA
-     conversationHistory.push({ role: 'user', content: question });
-     addChatBubble('user', question); // Display user bubble
+// --- Modified: sendCommand to use connectPort ---
+// --- Send Command/Chat Functions ---
+async function sendCommand(commandType) {
+    if (popupState.isProcessing || isConnectingOnClick) {
+        console.warn("Popup: Cannot send command. Processing or connecting.");
+        showStatus(popupState.isProcessing ? "Processing..." : "Connecting...");
+        return;
+    }
 
-     chatInputElement.value = '';
-     disableButtons(true);
+    try {
+        await connectPort(); // Ensure connection
+        // --- Connection successful, proceed ---
+        await resetState(false); // Reset state object only
+        popupState.isProcessing = true; saveState(); // Mark processing, save state FIRST
+        // --- Update UI ---
+        applyStateToUI(); // Show loader, hide chat, disable buttons based on new state
+        showStatus(""); // Clear status
+        // --- End UI Update ---
 
-     // Add assistant placeholder in BUBBLE AREA
-     addChatBubble('assistant', "", true);
+        const selectedLanguage = languageSelectElement.value;
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id || tab.id !== currentTabId) throw new Error("Tab context changed or invalid.");
 
-     // Send ORIGINAL ARTICLE and CHAT HISTORY to background
-     const message = {
-         command: "chatWithContext",
-         context: originalArticleText,
-         history: conversationHistory, // Q&A history only
-         language: languageSelectElement.value
-     };
+        chrome.scripting.executeScript({ target: { tabId: currentTabId }, func: () => window.getSelection().toString() }, (selection) => {
+             if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message || "Script execution failed.");
 
-     console.log("Popup: Sending chat request to background:", message);
-     try {
-         port.postMessage(message);
-     } catch(e) {
-         console.error("Popup: Error sending chat message via port:", e);
-         if (currentAssistantChatBubbleElement) {
-             currentAssistantChatBubbleElement.innerText = "Error sending message.";
-         }
-         disableButtons(false); // Re-enable buttons on error
-     }
+             const selectedText = selection?.[0]?.result?.trim();
+             let message = { language: selectedLanguage, command: '', text: '' };
+             let shouldSendMessage = true;
+
+              if (selectedText) {
+                    message.command = commandType === 'summarize' ? "summarizeSelectedText" : "explainSelectedText";
+                    message.text = selectedText;
+                    popupState.originalArticleText = selectedText; saveState(); // Store context & save
+              } else if (tab.url && !tab.url.startsWith('http') && !tab.url.startsWith('file')) {
+                    shouldSendMessage = false; popupState.isProcessing = false; saveState(); // Undo processing state
+                    showStatus("Cannot process this page type.", true); applyStateToUI(); // Update UI including enabling buttons
+              } else if (tab.url && tab.url.toLowerCase().endsWith(".pdf")) {
+                    shouldSendMessage = false; popupState.originalArticleText = ''; // PDF needs context later
+                    // Keep isProcessing = true for PDF background task
+                    console.log("Popup: Storing PDF request info and injecting script.");
+                    chrome.storage.local.set({ pdfProcessingInfo: { language: selectedLanguage, mode: commandType } })
+                        .then(() => chrome.scripting.executeScript({ target: { tabId: currentTabId }, files: ["getContentScript.js"] }))
+                        .catch(err => { throw new Error(`PDF init failed: ${err.message}`); }); // Propagate error
+              } else { // Full page
+                    message.command = commandType === 'summarize' ? "summarize" : "explain";
+                    popupState.originalArticleText = ''; // Wait for context message
+                    // Keep isProcessing = true
+              }
+
+             if (shouldSendMessage && port) {
+                 try { port.postMessage(message); } catch(e) { handleDisconnect(port); }
+             } else if (shouldSendMessage && !port) { // Should not happen due to connectPort check
+                 console.error("Popup: Port became null unexpectedly before sending.");
+                 handleDisconnect(null); // Trigger disconnect handling
+             } else if (!shouldSendMessage && !popupState.isProcessing) {
+                 // If sending was skipped AND processing was reset (e.g., non-web page)
+                 console.log("Popup: Sending skipped and processing reset.");
+             } else if (!shouldSendMessage && popupState.isProcessing) {
+                 // If sending skipped but processing continues (e.g. PDF)
+                 console.log("Popup: Sending skipped, waiting for background (PDF).");
+             }
+         }); // End executeScript callback
+    } catch(error) { // Catch errors from connectPort, tab query, executeScript, PDF init
+         console.error("Popup: Error during command processing:", error);
+         popupState.isProcessing = false;
+         await saveState(); // Ensure processing is false on error
+         showStatus(`Error: ${error.message}`, true);
+         applyStateToUI(); // Re-render UI in non-processing state
+    } // End outer try/catch
 }
 
-// --- Initialize ---
-document.addEventListener('DOMContentLoaded', () => {
-    // Cache DOM elements
+// --- Modified: sendChatMessage to use connectPort ---
+
+async function sendChatMessage() {
+     if (popupState.isProcessing || isConnectingOnClick || !chatInputElement || !popupState.originalArticleText) { return; }
+     const question = chatInputElement.value.trim(); if (!question) return;
+
+     try {
+        await connectPort(); // Ensure connection
+
+        // --- Connection successful, proceed ---
+        popupState.isProcessing = true;
+        await saveState(); // Mark processing
+
+        // Add user question to LIVE state history and display
+        popupState.conversationHistory.push({ role: 'user', content: question });
+        addChatBubble('user', question);
+        await saveState(); // Save history with user msg
+
+        chatInputElement.value = '';
+        updateButtonStates(); // Disable buttons now processing
+        addChatBubble('assistant', "", true); // Add placeholder
+
+        const messageToSend = {
+            command: "chatWithContext", context: popupState.originalArticleText,
+            history: popupState.conversationHistory, // Send current history including latest user question
+            language: languageSelectElement.value
+        };
+        try { port.postMessage(messageToSend); } catch(e) { handleDisconnect(port); }
+
+     } catch (connectError) { console.error("Popup: Failed to connect before sending chat:", connectError); }
+}
+// --- Connection & Message Handling ---
+async function handleDisconnect(disconnectedPort) {
+    if (!port || port !== disconnectedPort) return;
+    console.warn("Popup: Disconnected from background."); port = null;
+
+    // Reset processing/connecting state
+    const wasProcessing = popupState.isProcessing; // Check before resetting state obj
+    popupState.isProcessing = false; isConnectingOnClick = false;
+    await saveState();
+
+    showStatus("Disconnected. Click action to reconnect.", true);
+    updateButtonStates(); // Enable buttons now disconnected
+
+    // Update UI if a stream was interrupted
+    if (wasProcessing) {
+        if (currentAssistantChatBubbleElement) { currentAssistantChatBubbleElement.innerText = "(Disconnected)"; currentAssistantChatBubbleElement = null; }
+        else if (initialSummaryDisplayElement && initialSummaryDisplayElement.innerHTML.includes("loader")) {
+             renderInitialSummary(); // Re-render (will show placeholder or last summary)
+             if (initialSummaryDisplayElement) initialSummaryDisplayElement.innerHTML += "<br><small>(Disconnected)</small>";
+        }
+    }
+     currentAccumulator = '';
+}
+
+
+async function handleBackgroundMessage(message) {
+    // If connecting onClick, ignore messages until connected (shouldn't happen often)
+    if (isConnectingOnClick && message.action !== 'error') return;
+
+    // --- Normal Message Processing ---
+    // Clear processing/retry indicators (if any exist)
+     if ((message.action === "update" || message.action === "context") && initialSummaryDisplayElement && initialSummaryDisplayElement.innerHTML.includes("loader")) { initialSummaryDisplayElement.innerHTML = ""; currentAccumulator = ''; }
+     if (message.action === "update" && currentAssistantChatBubbleElement && currentAssistantChatBubbleElement.innerText.includes("Retrying...")) { currentAssistantChatBubbleElement.innerText = ""; currentAccumulator = ""; }
+
+
+    switch (message.action) {
+        case "update":
+            currentAccumulator += message.summary;
+            if (currentAssistantChatBubbleElement) { currentAssistantChatBubbleElement.innerText = currentAccumulator; scrollChatToBottom(); }
+            else if (initialSummaryDisplayElement){ initialSummaryDisplayElement.innerText = currentAccumulator; }
+            // Still processing, state doesn't change
+            break;
+
+        case "complete":
+            const completedText = message.summary || currentAccumulator || "";
+            currentAccumulator = '';
+            popupState.isProcessing = false; // Processing finished
+
+            if (currentAssistantChatBubbleElement) { // Completing CHAT
+                 try { currentAssistantChatBubbleElement.innerHTML = markdownConverter.makeHtml(completedText); } catch (e) { currentAssistantChatBubbleElement.innerText = completedText; }
+                 popupState.conversationHistory.push({ role: 'assistant', content: completedText });
+                 currentAssistantChatBubbleElement = null;
+            } else if (initialSummaryDisplayElement) { // Completing INITIAL summary
+                try { popupState.initialSummaryHtml = markdownConverter.makeHtml(completedText); } catch (e) { popupState.initialSummaryHtml = `<p>${completedText.replace(/\n/g, '<br>')}</p>`; }
+                renderInitialSummary();
+                popupState.conversationHistory = []; // Reset chat history
+                if (!popupState.originalArticleText) { console.warn("Popup: Initial complete, originalArticleText missing!"); }
+                // Update chat toggle state (visibility handled by applyStateToUI)
+            }
+            await saveState(); // Save final state
+            applyStateToUI(); // Update UI (enables buttons)
+            scrollChatToBottom(); // Ensure scrolled down
+            break;
+
+        case "context":
+             popupState.originalArticleText = message.content;
+             await saveState(); // Save received context
+             // Update chat toggle state implicitly via applyStateToUI later? Or here?
+             updateButtonStates(); // Update button states now context exists
+             break;
+
+        case "error":
+             console.error("Popup: Received error from background:", message.message);
+             popupState.isProcessing = false;
+             await saveState();
+             isConnectingOnClick = false; // Ensure flags are reset
+             showStatus(`Error: ${message.message}`, true);
+             if (currentAssistantChatBubbleElement) { currentAssistantChatBubbleElement.innerText = `Error: ${message.message}`; currentAssistantChatBubbleElement = null; }
+             else if (initialSummaryDisplayElement) { initialSummaryDisplayElement.innerText = `Error: ${message.message}`; }
+             updateButtonStates(); // Re-enable buttons
+             currentAccumulator = '';
+             break;
+
+        case "aborted":
+             popupState.isProcessing = false;
+             await saveState();
+             const abortMsg = "Operation cancelled.";
+              if (currentAssistantChatBubbleElement) { currentAssistantChatBubbleElement.innerText = abortMsg; currentAssistantChatBubbleElement = null; }
+              else if (initialSummaryDisplayElement) { initialSummaryDisplayElement.innerText = abortMsg; }
+             updateButtonStates(); // Re-enable buttons
+             currentAccumulator = '';
+             break;
+        default: console.warn("Popup: Received unknown message action:", message.action); break;
+    }
+}
+
+// --- Initialize on Load ---
+document.addEventListener('DOMContentLoaded', async () => {
+     // Cache DOM elements
     containerElement = document.querySelector('.container');
     initialSummaryDisplayElement = document.getElementById('initialSummaryDisplay');
     chatBubblesAreaElement = document.getElementById('chatBubblesArea');
@@ -249,19 +456,27 @@ document.addEventListener('DOMContentLoaded', () => {
     copyBtnElement = document.getElementById('copyBtn');
     languageSelectElement = document.getElementById('languageSelect');
 
-    // --- Event Listeners ---
+    // Get Tab ID
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) {
+        showStatus("Error: Could not identify current tab.", true);
+        disableButtons(true);
+        return;
+    }
+    currentTabId = tab.id;
+
+    // Load state
+    await loadState(currentTabId);
+
+    // Apply loaded state to UI
+    applyStateToUI();
+
+    // --- Attach Event Listeners ---
     summarizeBtnElement.addEventListener('click', () => sendCommand('summarize'));
     explainBtnElement.addEventListener('click', () => sendCommand('explain'));
     chatToggleBtnElement.addEventListener('click', toggleChatInput);
     sendChatBtnElement.addEventListener('click', sendChatMessage);
-    // Allow sending chat with Enter key in textarea
-    chatInputElement.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) { // Enter sends, Shift+Enter adds newline
-            e.preventDefault(); // Prevent newline
-            sendChatMessage();
-        }
-    });
-
+    chatInputElement.addEventListener('keypress', function(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } });
     copyBtnElement.addEventListener('click', function () {
         let textToCopy = "";
         if(initialSummaryDisplayElement) textToCopy += initialSummaryDisplayElement.innerText;
@@ -273,112 +488,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // --- Establish Connection ---
-    try {
-        port = chrome.runtime.connect({ name: "popup" });
-        console.log("Popup: Connection established.");
-
-        port.onMessage.addListener(function (message) {
-            // console.log("Popup: Message received:", message.action);
-
-            // Update applies either to initial summary OR chat bubble placeholder
-            switch (message.action) {
-                case "update":
-                    currentAccumulator += message.summary;
-                    if (currentAssistantChatBubbleElement) { // Updating a chat bubble
-                        currentAssistantChatBubbleElement.innerText = currentAccumulator;
-                         scrollChatToBottom();
-                    } else if (initialSummaryDisplayElement){ // Updating initial summary
-                         // Update plain text during streaming for initial summary
-                        initialSummaryDisplayElement.innerText = currentAccumulator;
-                    }
-                    break;
-
-                case "complete":
-                    const completedText = currentAccumulator;
-                    currentAccumulator = '';
-
-                    if (currentAssistantChatBubbleElement) { // Completing a CHAT response
-                        // Finalize rendering in the bubble area
-                        try {
-                            currentAssistantChatBubbleElement.innerHTML = markdownConverter.makeHtml(completedText);
-                         } catch (e) { currentAssistantChatBubbleElement.innerText = completedText; }
-                        // Add assistant chat response to Q&A history
-                        conversationHistory.push({ role: 'assistant', content: completedText });
-                        currentAssistantChatBubbleElement = null; // Clear ref
-                    } else if (initialSummaryDisplayElement) { // Completing the INITIAL summary/explanation
-                        // Finalize rendering in the summary display area
-                        try {
-                            initialSummaryDisplayElement.innerHTML = markdownConverter.makeHtml(completedText);
-                        } catch (e) { initialSummaryDisplayElement.innerText = completedText; }
-                        // Initialize Q&A history as empty
-                        conversationHistory = [];
-                        // Check context and enable chat toggle
-                        if (!originalArticleText) { console.warn("Popup: Initial complete, but originalArticleText missing!"); }
-                        if (chatToggleBtnElement && originalArticleText) {
-                            chatToggleBtnElement.style.display = 'inline-block';
-                            chatToggleBtnElement.disabled = false;
-                        } else if (chatToggleBtnElement) {
-                            chatToggleBtnElement.style.display = 'none';
-                        }
-                    }
-                    disableButtons(false);
-                    scrollChatToBottom(); // Ensure chat is scrolled down if visible
-                    break;
-
-                case "context":
-                     originalArticleText = message.content;
-                     break;
-
-                case "error":
-                    const errorMsg = "Error: " + message.message;
-                    if (currentAssistantChatBubbleElement) {
-                        currentAssistantChatBubbleElement.innerText = errorMsg; // Show error in placeholder
-                        currentAssistantChatBubbleElement = null; // Clear ref
-                    } else {
-                        chatDisplayElement.innerText = errorMsg; // Show error for initial request
-                    }
-                    disableButtons(false);
-                    currentAccumulator = '';
-                    // Optionally clear history/context on error?
-                    break;
-                case "aborted":
-                     const abortMsg = "Operation cancelled.";
-                      if (currentAssistantChatBubbleElement) {
-                        currentAssistantChatBubbleElement.innerText = abortMsg;
-                        currentAssistantChatBubbleElement = null;
-                    } else {
-                        chatDisplayElement.innerText = abortMsg;
-                    }
-                    disableButtons(false);
-                    currentAccumulator = '';
-                    break;
-                default:
-                     console.warn("Popup: Received unknown message action:", message.action);
-            }
-        });
-
-        port.onDisconnect.addListener(() => {
-            console.warn("Popup: Disconnected from background.");
-            port = null;
-            currentAccumulator = '';
-            conversationHistory = [];
-            if (containerElement) containerElement.classList.remove('chat-active'); // Also remove on disconnect
-            isChatVisible = false;
-            if (chatDisplayElement) { /* Update UI */ }
-            disableButtons(true);
-        });
-
-        // Initial state after connection
-        disableButtons(false);
-        if (chatToggleBtnElement) chatToggleBtnElement.style.display = 'none';
-        // Ensure class isn't present on load
-        if (containerElement) containerElement.classList.remove('chat-active');
-
-
-    } catch (error) {
-        console.error("Popup: Failed to connect to background:", error);
-        if (chatDisplayElement) chatDisplayElement.innerText = "Error connecting to background.";
-        disableButtons(true);
-    }
+    // --- Attempt Initial Connection (but don't block UI if fails) ---
+    connectPort().then(() => updateButtonStates()).catch(() => {
+        // Failure is handled internally by connectPort (shows status, enables buttons)
+        console.warn("Popup: Initial connection failed or background was inactive.");
+    });
 });
