@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Local LLM Summary Extension",
-    "version": "1.4",
+    "version": "1.5",
     "description": "Summarises or explains web pages and selected text using a local LLM.",
     "permissions": [
       "activeTab",
