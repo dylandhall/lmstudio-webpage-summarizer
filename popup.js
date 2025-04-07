@@ -8,6 +8,7 @@ function getDefaultPopupState() {
         initialSummaryHtml: '',
         isChatVisible: false,
         isProcessing: false, // Still track if background *should* be busy
+        currentAccumulator: ''
     };
 }
 
@@ -15,7 +16,6 @@ function getDefaultPopupState() {
 let port = null; // Null when disconnected
 let currentTabId = null;
 let currentAssistantChatBubbleElement = null;
-let currentAccumulator = '';
 let isConnectingOnClick = false; // Flag for user-initiated connection attempt
 
 // --- Current State (Loaded/Saved) ---
@@ -118,18 +118,19 @@ async function loadState(tabId) {
     try {
         const result = await chrome.storage.session.get(key);
         if (result && result[key]) {
-            popupState = result[key]; return true;
+            popupState = result[key];
+            return true;
         }
     } catch (error) { console.error("Popup: Error loading state:", error); }
     popupState = getDefaultPopupState(); // Use default if not found or on error
     return false;
 }
 
-async function resetState(clearDisplay = true) {
+async function resetState() {
     console.log("Popup: Resetting state.");
     popupState = getDefaultPopupState(); // Reset state object (sets isProcessing=false)
     isConnectingOnClick = false; // Reset non-persistent flags
-    currentAccumulator = ''; currentAssistantChatBubbleElement = null;
+    currentAssistantChatBubbleElement = null;
 
     // Clear storage for this tab
     if (currentTabId) {
@@ -138,11 +139,8 @@ async function resetState(clearDisplay = true) {
         catch (error) { console.error(`Popup: Error clearing state for tab ${currentTabId}:`, error); }
     }
 
-    // Apply the clean state to the UI
-    if (clearDisplay) { applyStateToUI(); }
-    else { updateButtonStates(); } // Ensure buttons are enabled after reset unless starting new command immediately
-
     showStatus(""); // Clear any status message
+    await saveState();
 }
 
 // --- UI Rendering Functions ---
@@ -158,16 +156,17 @@ function renderInitialSummary() {
     }
 }
 
-function renderChatBubbles() {
+async function renderChatBubbles() {
     if (!chatBubblesAreaElement) return;
     chatBubblesAreaElement.innerHTML = '';
-    popupState.conversationHistory.forEach(message => {
-        addChatBubble(message.role, message.content, false);
-    });
+    popupState.conversationHistory.forEach(message => addChatBubble(message.role, message.content, false));
+    await saveState();
     // If reloading while processing a *chat* message, add the placeholder back
     if (popupState.isProcessing && popupState.conversationHistory.length > 0 && popupState.conversationHistory[popupState.conversationHistory.length - 1].role === 'user') {
          console.log("renderChatBubbles: Adding placeholder for ongoing chat response.");
          addChatBubble('assistant', '', true);
+
+         await saveState();
     }
     if (popupState.isChatVisible) { setTimeout(scrollChatToBottom, 50); }
 }
@@ -179,7 +178,7 @@ function addChatBubble(role, content = "", isStreamingPlaceholder = false) {
      if (isStreamingPlaceholder && role === 'assistant') {
          messageDiv.innerHTML = '<div class="loader"></div>';
          currentAssistantChatBubbleElement = messageDiv;
-         currentAccumulator = '';
+         popupState.currentAccumulator = '';
      } else if (role === 'user') { messageDiv.innerText = content; }
      else { try { messageDiv.innerHTML = markdownConverter.makeHtml(content); } catch (e) { messageDiv.innerText = content; } }
      chatBubblesAreaElement.appendChild(messageDiv);
@@ -188,9 +187,9 @@ function addChatBubble(role, content = "", isStreamingPlaceholder = false) {
 }
 
 // Apply UI state based on loaded/current popupState
-function applyStateToUI() {
+async function applyStateToUI() {
      renderInitialSummary();
-     renderChatBubbles();
+     await renderChatBubbles();
      // Update container class and chat area visibility based on state
      if (containerElement) { containerElement.classList.toggle('chat-active', popupState.isChatVisible); }
      if (chatBubblesAreaElement) { chatBubblesAreaElement.style.display = popupState.isChatVisible ? 'block' : 'none'; }
@@ -254,12 +253,11 @@ async function sendCommand(commandType) {
     try {
         await connectPort(); // Ensure connection
         // --- Connection successful, proceed ---
-        await resetState(false); // Reset state object only
+        await resetState(); // Reset state object only
         popupState.isProcessing = true;
         await saveState(); // Mark processing, save state FIRST
         // --- Update UI ---
-        applyStateToUI(); // Show loader, hide chat, disable buttons based on new state
-        showStatus(""); // Clear status
+        await applyStateToUI(); // Show loader, hide chat, disable buttons based on new state
         // --- End UI Update ---
 
         const selectedLanguage = languageSelectElement.value;
@@ -267,53 +265,59 @@ async function sendCommand(commandType) {
         if (!tab || !tab.id || tab.id !== currentTabId) throw new Error("Tab context changed or invalid.");
 
         chrome.scripting.executeScript({ target: { tabId: currentTabId }, func: () => window.getSelection().toString() }, async (selection) => {
-             if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message || "Script execution failed.");
+            try { // Add try block inside callback for error handling
+                 if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message || "Script execution failed.");
 
-             const selectedText = selection?.[0]?.result?.trim();
-             let message = { language: selectedLanguage, command: '', text: '' };
-             let shouldSendMessage = true;
+                 const selectedText = selection?.[0]?.result?.trim();
+                 let message = { language: selectedLanguage, command: '', text: '' };
+                 let shouldSendMessage = true;
 
-              if (selectedText) {
-                    message.command = commandType === 'summarize' ? "summarizeSelectedText" : "explainSelectedText";
-                    message.text = selectedText;
-                    popupState.originalArticleText = selectedText; saveState(); // Store context & save
-              } else if (tab.url && !tab.url.startsWith('http') && !tab.url.startsWith('file')) {
-                    shouldSendMessage = false; popupState.isProcessing = false;
-                    await saveState(); // Undo processing state
-                    showStatus("Cannot process this page type.", true);
-                    applyStateToUI(); // Update UI including enabling buttons
-              } else if (tab.url && tab.url.toLowerCase().endsWith(".pdf")) {
-                    shouldSendMessage = false; popupState.originalArticleText = ''; // PDF needs context later
-                    // Keep isProcessing = true for PDF background task
-                    console.log("Popup: Storing PDF request info and injecting script.");
-                    chrome.storage.local.set({ pdfProcessingInfo: { language: selectedLanguage, mode: commandType } })
-                        .then(() => chrome.scripting.executeScript({ target: { tabId: currentTabId }, files: ["getContentScript.js"] }))
-                        .catch(err => { throw new Error(`PDF init failed: ${err.message}`); }); // Propagate error
-              } else { // Full page
-                    message.command = commandType === 'summarize' ? "summarize" : "explain";
-                    popupState.originalArticleText = ''; // Wait for context message
-                    // Keep isProcessing = true
-              }
+                  if (selectedText) {
+                        message.command = commandType === 'summarize' ? "summarizeSelectedText" : "explainSelectedText";
+                        message.text = selectedText;
+                        popupState.originalArticleText = selectedText;
+                        await saveState(); // Store context & save
+                  } else if (tab.url && !tab.url.startsWith('http') && !tab.url.startsWith('file')) {
+                        popupState.isProcessing = false;
+                        shouldSendMessage = false;
+                        await saveState(); // Undo processing state
+                        showStatus("Cannot process this page type.", true);
+                  } else if (tab.url && tab.url.toLowerCase().endsWith(".pdf")) {
+                        shouldSendMessage = false;
+                        popupState.originalArticleText = ''; // PDF needs context later
+                        // Keep isProcessing = true for PDF background task
+                        console.log("Popup: Storing PDF request info and injecting script.");
+                        chrome.storage.local.set({ pdfProcessingInfo: { language: selectedLanguage, mode: commandType } })
+                            .then(() => chrome.scripting.executeScript({ target: { tabId: currentTabId }, files: ["getContentScript.js"] }))
+                            .catch(err => { throw new Error(`PDF init failed: ${err.message}`); }); // Propagate error
+                  } else { // Full page
+                        message.command = commandType === 'summarize' ? "summarize" : "explain";
+                        popupState.originalArticleText = ''; // Wait for context message
+                  }
 
-             if (shouldSendMessage && port) {
-                 try { port.postMessage(message); } catch(e) { handleDisconnect(port); }
-             } else if (shouldSendMessage && !port) { // Should not happen due to connectPort check
-                 console.error("Popup: Port became null unexpectedly before sending.");
-                 handleDisconnect(null); // Trigger disconnect handling
-             } else if (!shouldSendMessage && !popupState.isProcessing) {
-                 // If sending was skipped AND processing was reset (e.g., non-web page)
-                 console.log("Popup: Sending skipped and processing reset.");
-             } else if (!shouldSendMessage && popupState.isProcessing) {
-                 // If sending skipped but processing continues (e.g. PDF)
-                 console.log("Popup: Sending skipped, waiting for background (PDF).");
-             }
+                  await applyStateToUI();
+
+                  if (shouldSendMessage && port) { // Check port is still valid before sending
+                      try { port.postMessage(message); }
+                      catch(e) {
+                           // If postMessage fails, port is likely invalid, trigger disconnect
+                           console.error("Popup: postMessage failed, likely disconnected.", e);
+                           handleDisconnect(port); // Pass the (now invalid) port reference
+                      }
+                  }
+            } catch (error) { // Catch errors originating *inside* the callback
+                console.error("Popup: Error inside executeScript callback:", error);
+                popupState.isProcessing = false; saveState(); // Correct state
+                showStatus(`Error: ${error.message}`, true);
+                await applyStateToUI(); // Re-render UI in non-processing state
+            }
          }); // End executeScript callback
     } catch(error) { // Catch errors from connectPort, tab query, executeScript, PDF init
          console.error("Popup: Error during command processing:", error);
          popupState.isProcessing = false;
          await saveState(); // Ensure processing is false on error
          showStatus(`Error: ${error.message}`, true);
-         applyStateToUI(); // Re-render UI in non-processing state
+         await applyStateToUI(); // Re-render UI in non-processing state
     } // End outer try/catch
 }
 
@@ -338,6 +342,7 @@ async function sendChatMessage() {
         chatInputElement.value = '';
         updateButtonStates(); // Disable buttons now processing
         addChatBubble('assistant', "", true); // Add placeholder
+        await saveState();
 
         const messageToSend = {
             command: "chatWithContext", context: popupState.originalArticleText,
@@ -356,7 +361,9 @@ async function handleDisconnect(disconnectedPort) {
 
     // Reset processing/connecting state
     const wasProcessing = popupState.isProcessing; // Check before resetting state obj
-    popupState.isProcessing = false; isConnectingOnClick = false;
+    popupState.isProcessing = false;
+    popupState.currentAccumulator = '';
+    isConnectingOnClick = false;
     await saveState();
 
     showStatus("Disconnected. Click action to reconnect.", true);
@@ -370,7 +377,7 @@ async function handleDisconnect(disconnectedPort) {
              if (initialSummaryDisplayElement) initialSummaryDisplayElement.innerHTML += "<br><small>(Disconnected)</small>";
         }
     }
-     currentAccumulator = '';
+    // currentAccumulator = '';
 }
 
 
@@ -380,32 +387,38 @@ async function handleBackgroundMessage(message) {
 
     // --- Normal Message Processing ---
     // Clear processing/retry indicators (if any exist)
-     if ((message.action === "update" || message.action === "context") && initialSummaryDisplayElement && initialSummaryDisplayElement.innerHTML.includes("loader")) {
+    const isProcessing = (message.action === "update" || message.action === "context") && initialSummaryDisplayElement && initialSummaryDisplayElement.innerHTML.includes("loader");
+
+    const isRetrying = message.action === "update" && currentAssistantChatBubbleElement && currentAssistantChatBubbleElement.innerText.includes("Retrying...");
+     if (isProcessing) {
          initialSummaryDisplayElement.innerHTML = "";
-         currentAccumulator = '';
      }
-     if (message.action === "update" && currentAssistantChatBubbleElement && currentAssistantChatBubbleElement.innerText.includes("Retrying...")) {
+     if (isRetrying) {
          currentAssistantChatBubbleElement.innerText = "";
-         currentAccumulator = "";
      }
 
+     if (isProcessing || isRetrying){
+         popupState.currentAccumulator = '';
+         await saveState();
+     }
 
     switch (message.action) {
         case "update":
-            currentAccumulator += message.summary;
+            popupState.currentAccumulator += message.summary;
+            await saveState();
             if (currentAssistantChatBubbleElement) {
-                currentAssistantChatBubbleElement.innerText = currentAccumulator;
+                currentAssistantChatBubbleElement.innerText = popupState.currentAccumulator;
                 scrollChatToBottom();
             }
             else if (initialSummaryDisplayElement){
-                initialSummaryDisplayElement.innerText = currentAccumulator;
+                initialSummaryDisplayElement.innerText = popupState.currentAccumulator;
             }
             // Still processing, state doesn't change
             break;
 
         case "complete":
-            const completedText = message.summary || currentAccumulator || "";
-            currentAccumulator = '';
+            const completedText = message.summary || popupState.currentAccumulator || "";
+            popupState.currentAccumulator = '';
             popupState.isProcessing = false; // Processing finished
 
             if (currentAssistantChatBubbleElement) { // Completing CHAT
@@ -420,7 +433,7 @@ async function handleBackgroundMessage(message) {
                 // Update chat toggle state (visibility handled by applyStateToUI)
             }
             await saveState(); // Save final state
-            applyStateToUI(); // Update UI (enables buttons)
+            await applyStateToUI(); // Update UI (enables buttons)
             scrollChatToBottom(); // Ensure scrolled down
             break;
 
@@ -434,17 +447,18 @@ async function handleBackgroundMessage(message) {
         case "error":
              console.error("Popup: Received error from background:", message.message);
              popupState.isProcessing = false;
+             popupState.currentAccumulator = '';
              await saveState();
              isConnectingOnClick = false; // Ensure flags are reset
              showStatus(`Error: ${message.message}`, true);
              if (currentAssistantChatBubbleElement) { currentAssistantChatBubbleElement.innerText = `Error: ${message.message}`; currentAssistantChatBubbleElement = null; }
              else if (initialSummaryDisplayElement) { initialSummaryDisplayElement.innerText = `Error: ${message.message}`; }
              updateButtonStates(); // Re-enable buttons
-             currentAccumulator = '';
              break;
 
         case "aborted":
              popupState.isProcessing = false;
+             popupState.currentAccumulator = '';
              await saveState();
              const abortMsg = "Operation cancelled.";
              if (currentAssistantChatBubbleElement) {
@@ -454,7 +468,6 @@ async function handleBackgroundMessage(message) {
                  initialSummaryDisplayElement.innerText = abortMsg;
              }
              updateButtonStates(); // Re-enable buttons
-             currentAccumulator = '';
              break;
         default:
             console.warn("Popup: Received unknown message action:", message.action);
@@ -489,8 +502,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load state
     await loadState(currentTabId);
 
+    if (popupState.isProcessing){
+        if (popupState.initialSummaryHtml?.length > 0){
+            popupState.isProcessing = false;
+        } else {
+            popupState = getDefaultPopupState();
+        }
+    }
+    await saveState();
     // Apply loaded state to UI
-    applyStateToUI();
+    await applyStateToUI();
 
     // --- Attach Event Listeners ---
     summarizeBtnElement.addEventListener('click', () => sendCommand('summarize'));
