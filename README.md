@@ -1,6 +1,29 @@
 # Note
 
-Original readme below - forked so I can add customisation and a few small features.
+## Updates to this fork
+
+Original readme below - this project has now been very heavily modified. It supports:
+
+* Customising your prompts and model
+* Saving state if the popup is closed/opened
+* Automatic reconnects and state handling if chrome closes the background service
+* Chat interface to ask questions about the article
+* Rolling chat window to continue conversation
+
+Note, a lot of this was done as an experiment with AI generated code. It falls WELL below the standard for anything I'd write myself but it's working and that's impressive. I'm not sure it saved time in the long run but it was a fun experiment.
+
+### Screenshots
+
+#### Summary
+
+![image](https://github.com/user-attachments/assets/bbd57a1f-2143-4532-9379-6e1d0c045c07)
+
+#### With the chat interface
+
+![image](https://github.com/user-attachments/assets/a8476895-6d85-4d7d-a3ea-17df068c3ee8)
+
+
+# Original readme below
 
 # Local Web Page Summarizer Chrome Extension
 
