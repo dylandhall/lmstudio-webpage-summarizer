@@ -2,296 +2,364 @@
 
 import { defaultModel, defaultSummarizePrompt, defaultExplainPrompt } from './defaults.js';
 
+// Global variable to hold the controller for the CURRENTLY active fetch request
 let currentAbortController = null;
+// Keep track of the popup port to know when it disconnects
 let popupPort = null;
 
-// --- Function Definitions (extractContent, getSettings, summarizeContent) ---
-// Keep these functions as they were defined in the previous working version
-// Function to extract content
+// Function to extract content using cloneNode to avoid modifying the live page
 function extractContent() {
-    // ... (implementation using cloneNode) ...
     return new Promise((resolve, reject) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-      if (!tabs || tabs.length === 0 || !tabs[0].id) {
-        console.error("BG: No active tab found or tab has no ID.");
-        return reject("No active tab found.");
-      }
-      const tabId = tabs[0].id;
-      // console.log("BG: Attempting script execution on tab:", tabId);
-
-      chrome.scripting.executeScript(
-        {
-          target: { tabId: tabId },
-          function: () => {
-            // console.log("CS: Extract script executing..."); // CS = Content Script context
-            try {
-              const clonedBody = document.body.cloneNode(true);
-              const selectorsToRemove = "header, footer, nav, aside, .ad, .advertisement, .popup, .modal, .sidebar, script, style, link, [aria-hidden='true'], noscript, iframe, svg, canvas, video, audio, button, input, select, textarea";
-              clonedBody.querySelectorAll(selectorsToRemove)
-                       .forEach((el) => el.remove());
-              const mainContentSelectors = 'main, article, [role="main"], #main, #content, .main, .content, .post-body, .entry-content';
-              let mainContentElement = clonedBody.querySelector(mainContentSelectors);
-              let text;
-              if (mainContentElement) {
-                text = mainContentElement.innerText;
-              } else {
-                text = clonedBody.innerText;
-              }
-              const cleanedText = text.replace(/\s\s+/g, ' ').trim();
-              // console.log(`CS: Extraction complete, length: ${cleanedText.length}`);
-              return cleanedText;
-            } catch (e) {
-              console.error("CS: Error during content extraction script:", e);
-              // Fallback to basic body text if cloning/cleaning fails
-              return document.body.innerText.replace(/\s\s+/g, ' ').trim();
+        chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+            if (!tabs || tabs.length === 0 || !tabs[0].id) {
+                console.error("BG: No active tab found or tab has no ID.");
+                return reject("No active tab found.");
             }
-          },
-        },
-        (results) => {
-          if (chrome.runtime.lastError) {
-            console.error("BG: Scripting Error:", chrome.runtime.lastError.message);
-            return reject(`Failed to execute content extraction script: ${chrome.runtime.lastError.message}`);
-          }
-          if (results && results[0] && typeof results[0].result === 'string') {
-             if(results[0].result.trim().length > 0) {
-                // console.log("BG: Successfully extracted content (length: " + results[0].result.length + ").");
-                resolve(results[0].result);
-             } else {
-                 console.warn("BG: Extraction resulted in empty string. Attempting fallback.");
-                 chrome.scripting.executeScript( // Fallback
-                   { target: { tabId: tabId }, function: () => document.body.innerText.replace(/\s\s+/g, ' ').trim() },
-                   (fallbackResults) => {
-                     if (chrome.runtime.lastError || !fallbackResults || !fallbackResults[0] || typeof fallbackResults[0].result !== 'string') {
-                       console.error("BG: Final fallback content extraction failed:", chrome.runtime.lastError?.message);
-                       return reject("Failed to extract any meaningful content.");
-                     }
-                     if (fallbackResults[0].result.trim().length === 0) {
-                        console.error("BG: Even basic body.innerText extraction yielded empty string.");
-                        return reject("Page seems to contain no extractable text.");
-                     }
-                     // console.log("BG: Used final fallback body.innerText extraction.");
-                     resolve(fallbackResults[0].result);
-                   }
-                 );
-             }
-          } else {
-            console.error("BG: Content extraction script returned unexpected result:", results);
-            reject("Failed to extract content: script did not return valid text.");
-          }
-        }
-      );
+            const tabId = tabs[0].id;
+
+            chrome.scripting.executeScript(
+                {
+                    target: { tabId: tabId },
+                    function: () => {
+                        try {
+                            const clonedBody = document.body.cloneNode(true);
+                            const selectorsToRemove = "header, footer, nav, aside, .ad, .advertisement, .popup, .modal, .sidebar, script, style, link, [aria-hidden='true'], noscript, iframe, svg, canvas, video, audio, button, input, select, textarea";
+                            clonedBody.querySelectorAll(selectorsToRemove)
+                                .forEach((el) => el.remove());
+                            const mainContentSelectors = 'main, article, [role="main"], #main, #content, .main, .content, .post-body, .entry-content';
+                            let mainContentElement = clonedBody.querySelector(mainContentSelectors);
+                            let text = mainContentElement ? mainContentElement.innerText : clonedBody.innerText;
+                            return text.replace(/\s\s+/g, ' ').trim();
+                        } catch (e) {
+                            console.error("CS: Error during content extraction script:", e);
+                            return document.body.innerText.replace(/\s\s+/g, ' ').trim();
+                        }
+                    },
+                },
+                (results) => {
+                    if (chrome.runtime.lastError) {
+                        console.error("BG: Scripting Error:", chrome.runtime.lastError.message);
+                        return reject(`Failed to execute content extraction script: ${chrome.runtime.lastError.message}`);
+                    }
+                    if (results && results[0] && typeof results[0].result === 'string') {
+                        if (results[0].result.trim().length > 0) {
+                            resolve(results[0].result);
+                        } else {
+                            // Attempt fallback if primary extraction yields empty string
+                            chrome.scripting.executeScript(
+                                { target: { tabId: tabId }, function: () => document.body.innerText.replace(/\s\s+/g, ' ').trim() },
+                                (fallbackResults) => {
+                                    if (chrome.runtime.lastError || !fallbackResults || !fallbackResults[0] || typeof fallbackResults[0].result !== 'string') {
+                                        console.error("BG: Fallback content extraction failed:", chrome.runtime.lastError?.message);
+                                        return reject("Failed to extract any meaningful content.");
+                                    }
+                                    if (fallbackResults[0].result.trim().length === 0) {
+                                        console.error("BG: Even fallback body.innerText extraction yielded empty string.");
+                                        return reject("Page seems to contain no extractable text.");
+                                    }
+                                    resolve(fallbackResults[0].result);
+                                }
+                            );
+                        }
+                    } else {
+                        console.error("BG: Content extraction script returned unexpected result:", results);
+                        reject("Failed to extract content: script did not return valid text.");
+                    }
+                }
+            );
+        });
     });
-  });
 }
 
-// Function to get settings
+// Function to get settings from storage or use imported defaults
 function getSettings() {
-    // ... (implementation remains the same) ...
-     return new Promise((resolve) => {
+    return new Promise((resolve) => {
         chrome.storage.sync.get({
             modelName: defaultModel,
             summarizePrompt: defaultSummarizePrompt,
             explainPrompt: defaultExplainPrompt
-        }, (items) => { resolve(items); });
+        }, (items) => {
+            resolve(items);
+        });
     });
 }
 
-// Function to summarize/explain (API call)
+// Function to safely send messages to the potentially closed popup
+function safeSendMessage(message) {
+    if (popupPort) {
+        try {
+            popupPort.postMessage(message);
+        } catch (error) {
+            // console.log("BG: Failed to send message to popup (likely closed):", error.message);
+            popupPort = null;
+            if (currentAbortController) {
+                // console.log("BG: Aborting request due to failed message send (popup closed).");
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
+        }
+    } else {
+        // console.log("BG: Skipping message send, popup not connected:", message.action);
+        if (currentAbortController && message.action !== 'aborted') {
+            // console.log("BG: Aborting request because popup is already disconnected.");
+            currentAbortController.abort();
+            currentAbortController = null;
+        }
+    }
+}
+
+
+// Function to handle initial Summary/Explanation requests
 async function summarizeContent(contentType, content, lang, mode, abortSignal) {
-    // ... (implementation remains the same, includes fetch with signal, stream reading, error handling) ...
-     try {
-        // console.log(`BG: summarizeContent called. Type: ${contentType}, Lang: ${lang}, Mode: ${mode}`);
+    try {
         const settings = await getSettings();
         const modelName = settings.modelName;
         let baseSummarizePrompt = settings.summarizePrompt;
         let baseExplainPrompt = settings.explainPrompt;
 
-        // Add a timeout for content extraction? Could be complex. Start without it.
+        // Extract content if it's a full webpage request
         if (contentType === "web") {
-            // console.log("BG: Extracting web content...");
-            content = ""; // Reset content
+            content = ""; // Reset
             try {
-                content = await extractContent(); // This might reject
+                content = await extractContent();
+                // Send extracted content back to popup so it has the context
+                if (content && content.trim().length > 0) {
+                    safeSendMessage({ action: "context", content: content });
+                } else {
+                     console.warn("BG: Extracted web content is empty.");
+                     // Continue anyway, let API handle empty input if it occurs
+                }
             } catch (extractError) {
                  console.error("BG: Content extraction failed:", extractError);
-                 throw new Error(`Content extraction failed: ${extractError.message || extractError}`); // Re-throw to be caught below
+                 safeSendMessage({ action: "error", message: `Content extraction failed: ${extractError.message || extractError}` });
+                 throw extractError; // Stop processing
             }
-            // console.log(`BG: Web content extracted (${content.length} chars).`);
-            if (!content || content.trim().length === 0) {
-                console.error("BG: Extracted content is empty.");
-                throw new Error("No content extracted from the page to summarize/explain.");
+             if (!content || content.trim().length === 0) {
+                safeSendMessage({ action: "error", message: "No content extracted from the page." });
+                throw new Error("No content extracted from the page.");
+             }
+        } else if (contentType === "pdf" || contentType === "text") {
+            if (content && content.trim().length > 0) {
+                 // Send PDF or Selection text back as context
+                 console.log(`BG: Sending provided ${contentType} content back as context.`);
+                 safeSendMessage({ action: "context", content: content });
+            } else {
+                const errorMsg = `No content provided for ${contentType}.`;
+                safeSendMessage({ action: "error", message: errorMsg });
+                throw new Error(errorMsg);
             }
-        } else if (!content || content.trim().length === 0) {
-            console.error("BG: Received empty content for processing.");
-            throw new Error("No content provided to summarize/explain.");
-        } else {
-             // console.log(`BG: Using provided content (${content.length} chars). Type: ${contentType}`);
+        }
+        // Validate provided content for other types
+        else if (!content || content.trim().length === 0) {
+            const errorMsg = `No content provided for ${contentType}.`;
+            safeSendMessage({ action: "error", message: errorMsg });
+            throw new Error(errorMsg);
         }
 
-
+        // Prepare API request
         let systemPromptTemplate = mode === "summarize" ? baseSummarizePrompt : baseExplainPrompt;
         let systemCommand = systemPromptTemplate.replace(/{lang}/g, lang);
 
-        // console.log(`BG: Using Model: ${modelName}`);
-        // // console.log(`BG: System Command: ${systemCommand.substring(0, 100)}...`);
-        // console.log("BG: Preparing fetch request to API...");
-
         const response = await fetch("http://localhost:1234/v1/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", },
-          body: JSON.stringify({
-            model: modelName,
-            messages: [ { role: "system", content: systemCommand }, { role: "user", content: content.trim() }, ],
-            temperature: 0.3, max_tokens: -1, stream: true,
-          }),
-          signal: abortSignal
+            method: "POST",
+            headers: { "Content-Type": "application/json", },
+            body: JSON.stringify({
+                model: modelName,
+                messages: [{ role: "system", content: systemCommand }, { role: "user", content: content.trim() }],
+                temperature: 0.3, max_tokens: -1, stream: true,
+            }),
+            signal: abortSignal
         });
-
-        // console.log(`BG: Fetch response status: ${response.status}`);
 
         if (!response.ok) {
             const errorBody = await response.text();
-            console.error(`BG: API request failed. Status: ${response.status}, Body: ${errorBody}`);
-            throw new Error(`API Error: ${response.status} - ${response.statusText}. Check LM Studio console.`);
+            console.error(`BG: API Error Response: ${errorBody}`);
+            safeSendMessage({ action: "error", message: `API Error ${response.status}: ${response.statusText}` });
+            throw new Error(`API Error: ${response.status}`);
         }
         if (!response.body) {
-             console.error("BG: Response body is null.");
+             safeSendMessage({ action: "error", message: "API response body is missing." });
              throw new Error("Response body is null.");
         }
 
-
-        // console.log("BG: Starting to read API response stream...");
-        let summary = "";
+        // Process stream
         const reader = response.body.getReader();
-        let decoder = new TextDecoder();
+        const decoder = new TextDecoder();
         let buffer = "";
-        let chunksReceived = 0;
+        let responseText = ""; // Accumulate response if needed
 
         while (true) {
-          if (abortSignal.aborted) {
-              // console.log("BG: Aborting fetch read loop.");
-              reader.cancel().catch(e => console.warn("BG: Error cancelling reader:", e)); // Attempt to cancel
-              throw new DOMException('Aborted by user', 'AbortError');
-          }
-
-          const { done, value } = await reader.read();
-
-          if (done) {
-            // console.log("BG: API stream finished.");
-            if (!abortSignal.aborted) {
-                safeSendMessage({ action: "complete", summary: "" }); // Send final accumulated summary if needed? Or just signal done.
+            if (abortSignal.aborted) { throw new DOMException('Aborted by user', 'AbortError'); }
+            const { done, value } = await reader.read();
+            if (done) {
+                if (!abortSignal.aborted) { safeSendMessage({ action: "complete" }); }
+                break;
             }
-            break;
-          }
-
-          chunksReceived++;
-          buffer += decoder.decode(value, { stream: true });
-          // console.log(`BG: Received stream chunk ${chunksReceived}. Buffer size: ${buffer.length}`); // Can be very noisy
-
-          let lines = buffer.split('\n');
-          buffer = lines.pop(); // Keep incomplete line
-
-          for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                  const jsonStr = line.substring(6).trim();
-                  if (jsonStr === "[DONE]" || !jsonStr) continue;
-                  try {
-                    const result = JSON.parse(jsonStr);
-                    if (result?.choices?.[0]?.delta?.content) {
-                      const contentChunk = result.choices[0].delta.content;
-                      summary += contentChunk;
-                      if (contentChunk && !abortSignal.aborted) {
-                        // console.log("BG: Sending 'update' message to popup."); // Noisy
-                        safeSendMessage({ action: "update", summary: contentChunk, });
-                      }
-                    }
-                  } catch (error) { console.warn("BG: Failed to parse JSON chunk:", jsonStr, "Error:", error); }
-              }
-          }
+            buffer += decoder.decode(value, { stream: true });
+            let lines = buffer.split('\n');
+            buffer = lines.pop();
+            for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                    const jsonStr = line.substring(6).trim();
+                    if (jsonStr === "[DONE]" || !jsonStr) continue;
+                    try {
+                        const result = JSON.parse(jsonStr);
+                        if (result?.choices?.[0]?.delta?.content) {
+                            const contentChunk = result.choices[0].delta.content;
+                            responseText += contentChunk;
+                            if (contentChunk && !abortSignal.aborted) {
+                                safeSendMessage({ action: "update", summary: contentChunk });
+                            }
+                        }
+                    } catch (error) { console.warn("BG: Failed to parse JSON chunk:", jsonStr, error); }
+                }
+            }
         }
-        // console.log(`BG: summarizeContent finished successfully. Total Chunks: ${chunksReceived}`);
-        return summary;
+        return responseText; // Return the final generated text
 
-      } catch (error) {
-          if (error.name === 'AbortError') {
-              // console.log("BG: Fetch aborted successfully in summarizeContent.");
-              safeSendMessage({ action: "aborted" });
-              return "Operation aborted.";
-          } else {
-              console.error("BG: Error caught in summarizeContent:", error);
-              safeSendMessage({ action: "error", message: error.message || "An unknown error occurred during processing." });
-              // Ensure the promise rejects or returns an error string
-              // throw error; // Re-throwing might be better if caller needs to know
-              return `Error: ${error.message}`;
-          }
-      } finally {
-          // console.log("BG: summarizeContent finally block executing.");
-          if (currentAbortController && currentAbortController.signal === abortSignal) {
-              currentAbortController = null;
-              // console.log("BG: Cleared current AbortController.");
-          }
-      }
-}
-
-// Function to safely send messages to popup
-function safeSendMessage(message) {
-    // ... (implementation remains the same) ...
-     if (popupPort) {
-        try {
-            // console.log("BG: Sending message to popup:", message.action);
-            popupPort.postMessage(message);
-        } catch (error) {
-            // console.log("BG: Failed to send message to popup (likely closed):", error.message);
-            popupPort = null;
-             if (currentAbortController) {
-                 // console.log("BG: Aborting request due to failed message send (popup closed).");
-                 currentAbortController.abort();
-                 currentAbortController = null;
-             }
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            // console.log("BG: Fetch aborted successfully in summarizeContent.");
+            safeSendMessage({ action: "aborted" });
+        } else {
+            console.error("BG: Error caught in summarizeContent:", error);
+            // Avoid sending duplicate error if already sent above
+            if (!error.message?.includes("API Error") && !error.message?.includes("extraction failed") && !error.message?.includes("No content")) {
+                 safeSendMessage({ action: "error", message: error.message || "An unknown background error occurred." });
+            }
         }
-    } else {
-        // console.log("BG: Skipping message send, popup not connected:", message.action);
-        if (currentAbortController && message.action !== 'aborted') {
-             // console.log("BG: Aborting request because popup is already disconnected.");
-             currentAbortController.abort();
-             currentAbortController = null;
+        // Return or throw error state for promise chain
+        return `ErrorState: ${error.message}`;
+    } finally {
+        if (currentAbortController && currentAbortController.signal === abortSignal) {
+            currentAbortController = null;
         }
     }
 }
 
-// --- Connection Handling ---
-chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== "popup") return; // Ignore other connections
+// Function to handle chat requests
+async function processChat(originalContext, history, lang, abortSignal) {
+    try {
+        const settings = await getSettings();
+        const modelName = settings.modelName;
 
+        // Construct messages for API
+        const systemPrompt = `You are a helpful assistant discussing the following text. Answer the user's questions concisely based *only* on the text provided. Text:\n"""${originalContext}"""`;
+        const messages = [
+            { role: "system", content: systemPrompt },
+            ...history // Append conversation history
+        ];
+
+        const response = await fetch("http://localhost:1234/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                model: modelName,
+                messages: messages,
+                temperature: 0.5,
+                max_tokens: -1, // Or set a reasonable limit like 1024
+                stream: true,
+            }),
+            signal: abortSignal,
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+            console.error(`BG: Chat API Error Response: ${errorBody}`);
+            safeSendMessage({ action: "error", message: `Chat API Error ${response.status}: ${response.statusText}` });
+            throw new Error(`Chat API Error: ${response.status}`);
+        }
+        if (!response.body) {
+            safeSendMessage({ action: "error", message: "Chat API response body is missing." });
+            throw new Error("Chat response body is null.");
+        }
+
+        // Process stream (identical logic to summarizeContent stream processing)
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let responseText = "";
+
+        while (true) {
+            if (abortSignal.aborted) { throw new DOMException('Aborted by user', 'AbortError'); }
+            const { done, value } = await reader.read();
+            if (done) {
+                if (!abortSignal.aborted) { safeSendMessage({ action: "complete" }); }
+                break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            let lines = buffer.split('\n');
+            buffer = lines.pop();
+            for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                    const jsonStr = line.substring(6).trim();
+                    if (jsonStr === "[DONE]" || !jsonStr) continue;
+                    try {
+                        const result = JSON.parse(jsonStr);
+                        if (result?.choices?.[0]?.delta?.content) {
+                            const contentChunk = result.choices[0].delta.content;
+                            responseText += contentChunk;
+                            if (contentChunk && !abortSignal.aborted) {
+                                safeSendMessage({ action: "update", summary: contentChunk });
+                            }
+                        }
+                    } catch (error) { console.warn("BG: Failed to parse JSON chunk:", jsonStr, error); }
+                }
+            }
+        }
+        return responseText;
+
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            // console.log("BG: Chat fetch aborted successfully.");
+            safeSendMessage({ action: "aborted" });
+        } else {
+            console.error("BG: Error caught in processChat:", error);
+             if (!error.message?.includes("API Error")) { // Avoid duplicate API errors
+                safeSendMessage({ action: "error", message: error.message || "An unknown chat error occurred." });
+             }
+        }
+        return `ErrorState: ${error.message}`;
+    } finally {
+        if (currentAbortController && currentAbortController.signal === abortSignal) {
+            currentAbortController = null;
+        }
+    }
+}
+
+// Connection listener for communication with the popup
+chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== "popup") return;
     popupPort = port;
     // console.log("BG: Popup connected.");
 
-    // *** Attach message listener HERE ***
     port.onMessage.addListener((message) => {
-        // console.log("BG: Message received from popup via port:", message);
+        // console.log("BG: Message received via port:", message.command);
 
-        // --- Check if it's a command to process ---
+        // Abort previous request if a new command comes in (except for PDF errors from content script)
+        let shouldAbort = message.command !== "pdfProcessingError";
+        if (shouldAbort && currentAbortController) {
+            // console.log("BG: New request received, aborting previous one.");
+            currentAbortController.abort();
+            // Let the finally block clear the controller
+        }
+        // Create a new controller only if needed (i.e., not for PDF error display)
+        if (shouldAbort) {
+             currentAbortController = new AbortController();
+        }
+        const signal = currentAbortController ? currentAbortController.signal : null;
+
+
+        // Route based on command
         if (message.command === "summarize" || message.command === "explain" ||
             message.command === "summarizeSelectedText" || message.command === "explainSelectedText" ||
-            message.command === "sendPdfContent" || message.command === "pdfProcessingError") // Also handle PDF errors from content script
+            message.command === "sendPdfContent")
         {
-             // Handle PDF error from content script separately
-            if (message.command === "pdfProcessingError") {
-                console.error("BG: Received PDF Processing Error from content script:", message.message);
-                safeSendMessage({ action: "error", message: `PDF Error: ${message.message}` });
-                return; // Stop processing this message further
+            if (!signal) { // Should have a signal for these commands
+                 console.error("BG: Missing AbortController signal for command:", message.command);
+                 safeSendMessage({action: "error", message: "Internal background error (signal missing)."});
+                 return;
             }
-
-            // --- Abort previous request ---
-            if (currentAbortController) {
-                // console.log("BG: New request received, aborting previous one.");
-                currentAbortController.abort();
-                // Don't nullify here, let the finally block in summarizeContent do it
-            }
-            currentAbortController = new AbortController();
-            const signal = currentAbortController.signal;
-            // -------------
-
             const mode = message.command.toLowerCase().includes("explain") ? "explain" : "summarize";
             let contentType = "web";
             let contentToProcess = "";
@@ -302,25 +370,27 @@ chrome.runtime.onConnect.addListener((port) => {
             } else if (message.command === "sendPdfContent") {
                 contentType = "pdf";
                 contentToProcess = message.content;
-            } // Else: command is "summarize" or "explain", contentType remains "web"
+            } // Else: "summarize"/"explain" -> "web"
 
-            // console.log(`BG: Preparing to call summarizeContent. Type: ${contentType}, Mode: ${mode}, Lang: ${message.language}`);
-
-            // Call summarizeContent asynchronously
             summarizeContent(contentType, contentToProcess, message.language || 'en', mode, signal)
-                .then(result => {
-                    // Logging is done inside summarizeContent now for completion/abort
-                    // console.log(`BG: summarizeContent promise resolved. Result type: ${typeof result}`);
-                })
-                .catch(error => {
-                     // Errors should be caught and handled within summarizeContent or during extraction
-                     // This catch is mainly for unexpected errors before or after summarizeContent async call
-                    if (error.name !== 'AbortError') { // Don't log aborts as top-level errors here
-                        console.error(`BG: Uncaught error in message handling for command ${message.command}:`, error);
-                         // Maybe send a generic error if one wasn't sent already
-                        safeSendMessage({ action: "error", message: "An unexpected background error occurred." });
-                    }
-                });
+                .then(result => { /* Optional: Log completion state */ })
+                .catch(error => { if (error.name !== 'AbortError') { console.error(`BG: Error after summarizeContent call:`, error); }});
+
+        } else if (message.command === "chatWithContext") {
+             if (!signal) { // Should have a signal for chat
+                 console.error("BG: Missing AbortController signal for chat command.");
+                 safeSendMessage({action: "error", message: "Internal background error (signal missing)."});
+                 return;
+             }
+             processChat(message.context, message.history, message.language || 'en', signal)
+                 .then(result => { /* Optional: Log completion state */ })
+                 .catch(error => { if (error.name !== 'AbortError') { console.error(`BG: Error after processChat call:`, error); } });
+
+        } else if (message.command === "pdfProcessingError") {
+             console.error("BG: Received PDF Processing Error from content script:", message.message);
+             safeSendMessage({ action: "error", message: `PDF Error: ${message.message}` });
+             // No ongoing process to necessarily abort here
+
         } else {
             console.warn("BG: Received unknown message command via port:", message.command);
         }
@@ -329,7 +399,6 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onDisconnect.addListener(() => {
         // console.log("BG: Popup disconnected.");
         popupPort = null;
-
         if (currentAbortController) {
             // console.log("BG: Popup closed, aborting current request.");
             currentAbortController.abort();
@@ -338,4 +407,5 @@ chrome.runtime.onConnect.addListener((port) => {
     });
 });
 
-// console.log("Background service worker (module) started or woke up.");
+// Optional: Log when the service worker starts/wakes up
+// console.log("Background service worker started/awoken.");

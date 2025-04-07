@@ -7,11 +7,27 @@
 </head>
 <body>
     <div class="container">
-        <div id="summary" class="summary-box">Summary will appear here...</div>
+        <!-- NEW: Dedicated area for the initial summary -->
+        <div id="initialSummaryDisplay" class="initial-summary-box">Summary/Explanation will appear here...</div>
+
+        <!-- NEW: Dedicated area for chat bubbles (scrollable) -->
+        <div id="chatBubblesArea" class="chat-bubbles-area"></div> <!-- Initially hidden -->
+
+        <!-- Chat input area (remains the same, initially hidden) -->
+        <div id="chatInputArea" class="chat-input-area">
+            <textarea id="chatInput" placeholder="Ask a question..."></textarea>
+            <button id="sendChatBtn">Send</button>
+        </div>
+
+        <!-- Action buttons container (remains the same) -->
         <div class="actions">
-            <div class="left-actions">
-                <button id="copyBtn" class="image-button">
+            <!-- ... left and right actions ... -->
+             <div class="left-actions">
+                <button id="copyBtn" class="image-button" title="Copy Chat">
                     <img src="images/copy-icon.png" alt="Copy">
+                </button>
+                 <button id="chatToggleBtn" class="image-button" title="Ask Questions" style="display: none;">
+                    ?
                 </button>
             </div>
             <div class="right-actions">
@@ -25,8 +41,7 @@
             </div>
         </div>
     </div>
-    <script src="popup.js"></script>
     <script src="lib/showdown.min.js"></script>
-
+    <script src="popup.js" type="module"></script>
 </body>
 </html>
