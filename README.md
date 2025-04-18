@@ -1,5 +1,11 @@
 # Note
 
+# Do not use this! 
+
+I wrote a much better one from scratch, find it here: https://github.com/dylandhall/llm-plugin
+
+Check releases for a pre-built extension.
+
 ## Updates to this fork
 
 Original readme below - this project has now been very heavily modified. It supports:
